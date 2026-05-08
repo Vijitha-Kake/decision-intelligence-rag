@@ -7,3 +7,4 @@ python-dotenv
 pypdf
 tiktoken
 langchain-text-splitters
+sentence-transformers>=2.7.0

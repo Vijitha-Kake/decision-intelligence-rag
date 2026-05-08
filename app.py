@@ -1,35 +1,77 @@
 import os
 import streamlit as st
 from dotenv import load_dotenv
-
 from langchain_community.vectorstores import FAISS
 from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.runnables import RunnableParallel, RunnablePassthrough, RunnableLambda
 from langchain_core.output_parsers import StrOutputParser
 
-# ---------- App Config ----------
-st.set_page_config(page_title="Decision Intelligence Platform for Manufacturing Defect Analysis (RAG)", layout="wide")
+# Re-ranker import (requires: pip install sentence-transformers)
+from reranker import rerank
 
+# ---------- App Config ----------
+st.set_page_config(
+    page_title="Decision Intelligence Platform for Manufacturing Defect Analysis (RAG)",
+    layout="wide"
+)
 load_dotenv()
 
 FAISS_DIR = "vector_store/faiss_openai"
 
-# ---------- Helpers (your same logic) ----------
+# ---------- Helpers ----------
+
 def format_context(doc_score_pairs) -> str:
+    """Format FAISS (doc, score) pairs into numbered context blocks."""
     blocks = []
     for i, (doc, score) in enumerate(doc_score_pairs, 1):
         md = doc.metadata
-        src = f"{md.get('source_file')} | domain={md.get('domain')} | page={md.get('page')} | score={score:.4f}"
+        src = (
+            f"{md.get('source_file')} | domain={md.get('domain')} "
+            f"| page={md.get('page')} | faiss_score={score:.4f}"
+        )
         blocks.append(f"[{i}] SOURCE: {src}\n{doc.page_content.strip()}")
     return "\n\n".join(blocks)
 
+
+def format_context_reranked(triples) -> str:
+    """Format re-ranked (doc, faiss_score, rerank_score) triples into context blocks."""
+    blocks = []
+    for i, (doc, faiss_s, rerank_s) in enumerate(triples, 1):
+        md = doc.metadata
+        src = (
+            f"{md.get('source_file')} | domain={md.get('domain')} "
+            f"| page={md.get('page')} "
+            f"| faiss={faiss_s:.4f} | rerank={rerank_s:.4f}"
+        )
+        blocks.append(f"[{i}] SOURCE: {src}\n{doc.page_content.strip()}")
+    return "\n\n".join(blocks)
+
+
 def build_sources_list(doc_score_pairs) -> str:
+    """Build a clean numbered source list from FAISS pairs."""
     lines = []
     for i, (doc, score) in enumerate(doc_score_pairs, 1):
         md = doc.metadata
-        lines.append(f"[{i}] {md.get('source_file')} | domain={md.get('domain')} | page={md.get('page')} | score={score:.4f}")
+        lines.append(
+            f"[{i}] {md.get('source_file')} | domain={md.get('domain')} "
+            f"| page={md.get('page')} | faiss_score={score:.4f}"
+        )
     return "\n".join(lines)
+
+
+def build_sources_list_reranked(triples) -> str:
+    """Build a clean numbered source list from re-ranked triples."""
+    lines = []
+    for i, (doc, faiss_s, rerank_s) in enumerate(triples, 1):
+        md = doc.metadata
+        lines.append(
+            f"[{i}] {md.get('source_file')} | domain={md.get('domain')} "
+            f"| page={md.get('page')} "
+            f"| faiss={faiss_s:.4f} | rerank={rerank_s:.4f}"
+        )
+    return "\n".join(lines)
+
 
 def build_prompt():
     return ChatPromptTemplate.from_messages([
@@ -53,69 +95,99 @@ def build_prompt():
          "F) Escalation (who + why) (bullets with citations)\n\n"
          "G) Sources (copy exactly the list below)\n"
          "{sources}\n"
-        )
+         )
     ])
 
+
 # ---------- Caching ----------
+
 @st.cache_resource
 def load_vectorstore():
-    """
-    Loads embeddings + FAISS one time per Streamlit session.
-    """
+    """Load embeddings + FAISS once per Streamlit session."""
     embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
     db = FAISS.load_local(
         FAISS_DIR,
         embeddings,
-        allow_dangerous_deserialization=True  # OK if the FAISS index is created by you and trusted
+        allow_dangerous_deserialization=True
     )
     return db
 
+
 def build_rag_chain(db, top_k: int, model_name: str, temperature: float):
-    # 1) Retrieve with scores
     def retrieve_with_scores(question: str):
         return db.similarity_search_with_score(question, k=top_k)
 
-    # 2) Parallel: question + retrieved pairs
     parallel_chain = RunnableParallel({
-        "question": RunnablePassthrough(),
+        "question":   RunnablePassthrough(),
         "doc_scores": RunnableLambda(retrieve_with_scores),
     })
 
-    # 3) Convert to prompt inputs
     to_prompt_inputs = RunnableLambda(lambda x: {
-        "question": x["question"],
-        "context": format_context(x["doc_scores"]),
-        "sources": build_sources_list(x["doc_scores"]),
-        # keep raw in case we want to show later (not used by the prompt)
+        "question":        x["question"],
+        "context":         format_context(x["doc_scores"]),
+        "sources":         build_sources_list(x["doc_scores"]),
         "_raw_doc_scores": x["doc_scores"],
     })
 
     prompt = build_prompt()
-    model = ChatOpenAI(model=model_name, temperature=temperature)
+    model  = ChatOpenAI(model=model_name, temperature=temperature)
     parser = StrOutputParser()
 
-    chain = parallel_chain | to_prompt_inputs
-    rag_chain = chain | (RunnableLambda(lambda x: {k: x[k] for k in ["question", "context", "sources"]})) | prompt | model | parser
-    return chain, rag_chain  # chain returns doc_scores too; rag_chain returns final answer
+    # debug_chain returns raw doc_scores; rag_chain returns the final answer
+    debug_chain = parallel_chain | to_prompt_inputs
+    rag_chain   = (
+        debug_chain
+        | RunnableLambda(lambda x: {k: x[k] for k in ["question", "context", "sources"]})
+        | prompt | model | parser
+    )
+
+    return debug_chain, rag_chain
+
 
 # ---------- UI ----------
-st.title("Decision Intelligence Platform for Manufacturing Defect Analysis (RAG)")
 
+st.title("Decision Intelligence Platform for Manufacturing Defect Analysis (RAG)")
 st.caption("LLM-powered root cause analysis using structured and unstructured manufacturing documents")
 
+# ---------- Sidebar ----------
 
 with st.sidebar:
-    st.header("Settings")
-    top_k = st.slider("TOP_K (docs to retrieve)", min_value=1, max_value=10, value=4, step=1)
-    model_name = st.selectbox("Chat model", ["gpt-4o-mini", "gpt-4o", "gpt-5"], index=0)
-    temperature = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.0, step=0.05)
+    st.header("⚙️ Settings")
+
+    top_k = st.slider(
+        "FAISS TOP_K  (docs to retrieve)",
+        min_value=5, max_value=30, value=20, step=5,
+        help="Retrieve more docs so the re-ranker has better candidates to choose from."
+    )
+    top_n_rerank = st.slider(
+        "Re-ranker TOP_N  (docs passed to LLM)",
+        min_value=1, max_value=10, value=5, step=1,
+        help="After re-ranking, only the best N chunks go into the prompt."
+    )
+
+    use_reranker = st.toggle(
+        "🔀 Enable Cross-Encoder Re-Ranker",
+        value=True,
+        help="Uses cross-encoder/ms-marco-MiniLM-L-6-v2 to re-score each (query, chunk) pair."
+    )
+
+    model_name   = st.selectbox("Chat model", ["gpt-4o-mini", "gpt-4o", "gpt-5"], index=0)
+    temperature  = st.slider("Temperature", min_value=0.0, max_value=1.0, value=0.0, step=0.05)
     show_context = st.checkbox("Show retrieved context blocks", value=True)
+    show_comparison = st.checkbox(
+        "Show FAISS vs Re-Ranker comparison",
+        value=True,
+        help="Side-by-side view showing which chunks moved up or down after re-ranking."
+    )
 
-#default_q = "Welding misalignment defects are increasing. What are common causes and what maintenance actions should we take?"
+    st.divider()
+    st.caption(
+        "**Re-ranker model:** `cross-encoder/ms-marco-MiniLM-L-6-v2`  \n"
+        "Pre-trained on MS MARCO (Bing search relevance). ~80 MB, loads once."
+    )
 
-import streamlit as st
+# ---------- Sample Questions ----------
 
-# --- Categorized sample questions (keep yours) ---
 SAMPLE_QUESTIONS = {
     "Welding / Quality": [
         "Why are welding misalignment defects increasing?",
@@ -134,80 +206,90 @@ SAMPLE_QUESTIONS = {
     ],
 }
 
-# Optional default question (keep if you want a starter prompt)
 DEFAULT_Q = (
     "Welding misalignment defects are increasing. "
     "What are common causes and what maintenance actions should we take?"
 )
 
-# Keep one state variable for the active question
 if "question" not in st.session_state:
     st.session_state.question = DEFAULT_Q
 
 st.markdown("### Try a sample question (optional)")
 
-# 1) Category dropdown
-categories = ["— Select a category —"] + list(SAMPLE_QUESTIONS.keys())
-selected_cat = st.selectbox("Category", categories, index=0)
+categories    = ["— Select a category —"] + list(SAMPLE_QUESTIONS.keys())
+selected_cat  = st.selectbox("Category", categories, index=0)
 
-# 2) Question dropdown (depends on category)
 if selected_cat != categories[0]:
-    qs = ["— Select a sample question —"] + SAMPLE_QUESTIONS[selected_cat]
+    qs         = ["— Select a sample question —"] + SAMPLE_QUESTIONS[selected_cat]
     selected_q = st.selectbox("Sample question", qs, index=0)
-
-    # Copy chosen sample into the main input box
     if selected_q != qs[0]:
         st.session_state.question = selected_q
 else:
     st.selectbox("Sample question", ["Select a category first"], index=0, disabled=True)
 
-# 3) Free-form question input (editable)
 question = st.text_area("Or ask your own question", key="question", height=110)
 
-#question = st.text_area("Question", value=default_q, height=110)
-
 col1, col2 = st.columns([1, 1])
-run_btn = col1.button("Run RAG", type="primary")
+run_btn   = col1.button("Run RAG", type="primary")
 clear_btn = col2.button("Clear")
 
 if clear_btn:
-    st.session_state.pop("answer", None)
-    st.session_state.pop("sources", None)
-    st.session_state.pop("context", None)
-    st.session_state.pop("doc_scores", None)
+    for key in ["answer", "sources", "context", "doc_scores",
+                "top_pairs", "reranked_triples", "use_reranker"]:
+        st.session_state.pop(key, None)
     st.rerun()
 
-# Load DB once
+# ---------- Load DB ----------
+
 try:
     db = load_vectorstore()
 except Exception as e:
     st.error(f"Failed to load FAISS index from '{FAISS_DIR}'. Error: {e}")
     st.stop()
 
-# Build chains
-debug_chain, rag_chain = build_rag_chain(db, top_k=top_k, model_name=model_name, temperature=temperature)
+debug_chain, rag_chain = build_rag_chain(
+    db, top_k=top_k, model_name=model_name, temperature=temperature
+)
+
+# ---------- Run ----------
 
 if run_btn:
     if not question.strip():
         st.warning("Please enter a question.")
     else:
-        with st.spinner("Retrieving + generating answer..."):
-            # 1) Get doc_scores + prompt inputs
-            debug_out = debug_chain.invoke(question)
-            # debug_out has keys: question, doc_scores
-            doc_scores = debug_out["_raw_doc_scores"]
-            context_text = format_context(doc_scores)
-            sources_text = build_sources_list(doc_scores)
+        with st.spinner("Retrieving → re-ranking → generating answer..."):
 
-            # 2) Final answer
+            # Step 1: FAISS retrieval (wide net)
+            debug_out  = debug_chain.invoke(question)
+            doc_scores = debug_out["_raw_doc_scores"]       # List[(doc, faiss_score)]
+
+            # Step 2: Cross-encoder re-ranking (optional)
+            if use_reranker:
+                reranked_triples = rerank(question, doc_scores, top_n=top_n_rerank)
+                top_pairs        = [(doc, fs) for doc, fs, _ in reranked_triples]
+                context_text     = format_context_reranked(reranked_triples)
+                sources_text     = build_sources_list_reranked(reranked_triples)
+            else:
+                reranked_triples = None
+                top_pairs        = doc_scores[:top_n_rerank]
+                context_text     = format_context(top_pairs)
+                sources_text     = build_sources_list(top_pairs)
+
+            # Step 3: LLM answer (using re-ranked context)
             answer = rag_chain.invoke(question)
 
-        st.session_state["answer"] = answer
-        st.session_state["sources"] = sources_text
-        st.session_state["context"] = context_text
-        st.session_state["doc_scores"] = doc_scores
+            st.session_state.update({
+                "answer":           answer,
+                "sources":          sources_text,
+                "context":          context_text,
+                "doc_scores":       doc_scores,
+                "top_pairs":        top_pairs,
+                "reranked_triples": reranked_triples,
+                "use_reranker":     use_reranker,
+            })
 
 # ---------- Output ----------
+
 if "answer" in st.session_state:
     left, right = st.columns([1.3, 1])
 
@@ -216,19 +298,58 @@ if "answer" in st.session_state:
         st.write(st.session_state["answer"])
 
         if show_context:
-            st.subheader("Retrieved Context Blocks (debug)")
+            label = "Context sent to LLM (re-ranked)" if st.session_state.get("use_reranker") else "Context sent to LLM"
+            st.subheader(label)
             st.text(st.session_state["context"])
 
     with right:
         st.subheader("Sources")
         st.text(st.session_state["sources"])
 
-        st.subheader("Top Matches (metadata)")
-        for i, (doc, score) in enumerate(st.session_state["doc_scores"], 1):
-            md = doc.metadata or {}
-            st.markdown(
-                f"**[{i}] score={score:.4f}**  \n"
-                f"- file: `{md.get('source_file')}`  \n"
-                f"- domain: `{md.get('domain')}`  \n"
-                f"- page: `{md.get('page')}`"
+        # ── FAISS vs Re-Ranker comparison view ──
+        if (
+            show_comparison
+            and st.session_state.get("use_reranker")
+            and st.session_state.get("reranked_triples") is not None
+        ):
+            st.subheader("🔀 FAISS vs Re-Ranker")
+            st.caption(
+                f"FAISS retrieved **{len(st.session_state['doc_scores'])}** chunks  →  "
+                f"Re-ranker kept top **{len(st.session_state['reranked_triples'])}**"
             )
+
+            # Map each doc to its original FAISS rank (1-indexed)
+            faiss_order = {
+                id(doc): i + 1
+                for i, (doc, _) in enumerate(st.session_state["doc_scores"])
+            }
+
+            for new_rank, (doc, faiss_s, rerank_s) in enumerate(
+                st.session_state["reranked_triples"], 1
+            ):
+                old_rank = faiss_order.get(id(doc), "?")
+                if old_rank != "?" and new_rank < old_rank:
+                    arrow = "🟢 ▲ moved up"
+                elif old_rank != "?" and new_rank > old_rank:
+                    arrow = "🔴 ▼ moved down"
+                else:
+                    arrow = "⚪ ─ same"
+
+                md = doc.metadata or {}
+                st.markdown(
+                    f"**[{new_rank}]** {arrow}  *(was FAISS #{old_rank})* \n"
+                    f"- `{md.get('source_file')}` · page {md.get('page')} · domain `{md.get('domain')}` \n"
+                    f"- FAISS dist: `{faiss_s:.4f}` → Rerank score: `{rerank_s:.4f}`"
+                )
+
+        else:
+            # Fallback: original metadata display (re-ranker off)
+            st.subheader("Top Matches (metadata)")
+            for i, (doc, score) in enumerate(st.session_state["top_pairs"], 1):
+                md = doc.metadata or {}
+                st.markdown(
+                    f"**[{i}] score={score:.4f}** \n"
+                    f"- file: `{md.get('source_file')}` \n"
+                    f"- domain: `{md.get('domain')}` \n"
+                    f"- page: `{md.get('page')}`"
+                )
