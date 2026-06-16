@@ -132,38 +132,6 @@ know *which document* said it — for quality audit trails,
 regulatory compliance (ISO 9001), and accountability.
 A RAG system without citations is a liability in manufacturing.
 
----
-
-## Project Structure
-decision-intelligence-rag/
-├── README.md
-├── requirements.txt
-├── .gitignore
-│
-├── src/
-│ ├── ingest_and_chunk.py ← Document ingestion pipeline
-│ ├── embedding_faiss.py ← Vector store creation
-│ ├── rag_chain.py ← Core RAG pipeline
-│ ├── rag_chain_citation.py ← RAG with source attribution
-│ └── reranker.py ← Re-ranking layer
-│
-├── app/
-│ └── app.py ← Streamlit application
-│
-├── Data/
-│ ├── logs/ ← Defect log PDFs
-│ ├── maintenance/ ← Maintenance SOP PDFs
-│ ├── production/ ← Process overview PDFs
-│ ├── quality/ ← Quality report PDFs
-│ ├── supplier/ ← Supplier BOM PDFs
-│ └── web/ ← Industry context docs
-│
-├── vector_store/
-│ └── faiss_openai/ ← Persisted FAISS index
-│
-└── tests/
-└── test_retrieval.py ← Retrieval testing
-
 
 ---
 
@@ -318,8 +286,6 @@ network.
 **LangChain Documentation**
 - [LangChain RAG Tutorial](https://python.langchain.com/docs/tutorials/rag/)
   — Retrieval chain implementation
-- [FAISS Integration](https://python.langchain.com/docs/integrations/vectorstores/faiss/)
-  — Vector store setup and similarity search
 
 **Research Papers**
 - Lewis et al. (2020), *Retrieval-Augmented Generation
