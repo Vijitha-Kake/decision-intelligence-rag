@@ -26,7 +26,7 @@ reducing root cause investigation time significantly.
 
 ## 🚀 Live Demo
 
-**[Try the app here →](https://manufacturing-rag-app-6habrndrkxoos39atcuv6d.streamlit.app/)**
+**[Try the app here →](https://decision-intelligence-rag-295bxshkxm9qkmndhmd9ef.streamlit.app/)**
 
 Sample questions you can ask:
 - *"What are the most common defect causes in the welding process?"*
